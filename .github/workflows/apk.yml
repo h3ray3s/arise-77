@@ -1,0 +1,90 @@
+name: Build Arise 77 APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      app_id:
+        description: "App id. Keep com.arise.system, or use a new one to install as a separate app"
+        default: "com.arise.system"
+      app_name:
+        description: "Name shown on the phone"
+        default: "Arise 77"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Bundle the PDF reader so PDFs open offline
+        run: mkdir -p www/lib && cp node_modules/pdfjs-dist/build/pdf.min.js node_modules/pdfjs-dist/build/pdf.worker.min.js www/lib/
+
+      - name: Apply the app id and name
+        env:
+          APP_ID: ${{ github.event.inputs.app_id || 'com.arise.system' }}
+          APP_NAME: ${{ github.event.inputs.app_name || 'Arise 77' }}
+        run: |
+          echo "$APP_ID" | grep -Eq '^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$' || { echo "Invalid app id"; exit 1; }
+          node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('capacitor.config.json'));c.appId=process.env.APP_ID;c.appName=process.env.APP_NAME;fs.writeFileSync('capacitor.config.json',JSON.stringify(c,null,2))"
+          cat capacitor.config.json
+
+      - name: Create the Android project
+        run: npx cap add android
+
+      - name: Add notification permissions
+        run: sed -i 's#<application#<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/><uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/><application#' android/app/src/main/AndroidManifest.xml
+
+      - name: Set a version number higher than every earlier build
+        run: |
+          CODE=$(( $(date -u +%s) / 60 ))
+          sed -i "s/versionCode 1/versionCode $CODE/" android/app/build.gradle
+          sed -i "s/versionName \"1.0\"/versionName \"2.$CODE\"/" android/app/build.gradle
+          grep -n "versionCode\|versionName\|applicationId" android/app/build.gradle
+
+      - name: Copy web files into the Android project
+        run: npx cap sync android
+
+      - name: Sign with the same key as the old app
+        run: |
+          mkdir -p ~/.android
+          cp debug.keystore ~/.android/debug.keystore
+          keytool -list -keystore debug.keystore -storepass android | grep -i "fingerprint"
+
+      - name: Build the APK
+        run: |
+          chmod +x android/gradlew
+          cd android
+          ./gradlew assembleDebug
+
+      - name: Name the APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk arise-77.apk
+
+      - name: Keep the APK as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: arise-77-apk
+          path: arise-77.apk
+
+      - name: Publish a release with the APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Arise 77 build ${{ github.run_number }}
+          files: arise-77.apk
